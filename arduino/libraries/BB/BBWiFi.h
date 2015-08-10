@@ -1,5 +1,7 @@
-#ifndef BBWiFi_h
-#define BBWiFi_h
+#pragma once
+
+#define SERVER_TIMEOUT_MILS 10000
+#define IDLE_TIMEOUT_MS 3000
 
 #include <Arduino.h>
 #include <Adafruit_CC3000.h>
@@ -9,28 +11,28 @@ class BBWiFi
 {
   public:
     BBWiFi(int csPin, int irqPin, int vbenPin);
-    BBWiFi(int csPin, int irqPin, int vbenPin, int onlineLedPin);
+    BBWiFi(int csPin, int irqPin, int vbenPin, int onlineLedPin, const char* ssid, const char* password);
     bool isNetworkReady();
     bool isNetworkSetup();
     void checkConfigure();
     void reset();
     void setMode(int mode);
-    bool sendBootMessage(char *type, char *device);
-    void sendHeartbeat(char *type, char *device);
+    bool sendBootMessage(const char *service, const char *device);
+    bool sendHeartbeat(const char *service, const char *device);
     bool sendData(char *stringToSend, char httpResponse[]);
-    bool sendLookup(char *type, char *device, char *keyFob);
-    bool sendArchiveLookup(char *type, char *device, char *keyFob, time_t time);
+    bool sendLookup(const char *service, const char *device, char *keyFob);
+    bool sendLogEntry(const char *service, const char *device, char *keyFob, time_t time);
     void decodeResponse(char *stringToSend, char *message);
     
     time_t getTime();
     bool hasTime();
 
     void clearBuffer();
-    boolean isBusy();
+    //boolean isBusy();
 
     char serverResponse[150];
     int receiveString();
-    boolean waitForResponse();
+    //boolean waitForResponse();
 
     char cmd[50];
     bool hasCmd();
@@ -77,4 +79,3 @@ class BBWiFi
     Adafruit_CC3000_Client _client;
 };
 
-#endif

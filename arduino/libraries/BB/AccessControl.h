@@ -1,5 +1,4 @@
-#ifndef AccessControl_h
-#define AccessControl_h
+#pragma once
 
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
@@ -55,5 +54,3 @@ class AccessControl
     bool _time_set = false;
 
 };
-
-#endif

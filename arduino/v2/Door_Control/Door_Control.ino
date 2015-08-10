@@ -1,9 +1,9 @@
 /*
 LCD Display
 EEPROM
-
 Door entry system - refactored version
 */
+
 #include <avr/wdt.h>
 #include <aJSON.h>
 #include "pitches.h"
@@ -17,20 +17,19 @@ Door entry system - refactored version
 #include <Timezone.h>
 #include <aJSON.h>
 #include <Metro.h>
+#include "WifiLogin.h"
+//Local Database
+#include <EDB.h>
+#include <EEPROM.h>
+#include "Database.h"
 
 
 #define DEVICE "new-door"
-#define TYPE "door"
+#define SERVICE "entry"
 
 #define DISPLAY_TIME
 
 
-//External EEPROM
-#define EXTERNAL_EEPROM_ADDR 0x50  //eeprom address
-
-//Local Database
-#include <EDB.h>
-#include <EEPROM.h>
 
 //Network
 #include "BBWiFi.h"
@@ -56,12 +55,12 @@ const int LEDPin = 2;
 unsigned long heartbeatTimer;
 unsigned long isOnlineTimer = 0;
 boolean forceScreenRefresh;
-boolean reportedHome = false;
-unsigned long setupDelayTimmer = 0;
-unsigned long uploadDelayTimmer = 0;
+boolean bootMessageSent = false;
+unsigned long setupDelayTimer = 0;
+unsigned long uploadDelayTimer = 0;
 
 
-//Delay timmers
+//Delay timers
 Metro fiveMinutes = Metro(1000);
 //Metro fiveMinutes = Metro(1000);
 
@@ -73,62 +72,26 @@ TimeChangeRule *tcr;        //pointer to the time change rule, use to get the TZ
 time_t utc, local;
 
 
-// Use the external EEPROM as storage
-#define TABLE_SIZE 32768 // Arduino 24LC256
-
-//Setup the structure of the stored data
-struct AccessControlData {
-  char tag[13];
-  char name[21];
-} 
-accessControlData;
-
-struct LogRecord {
-  char tag[13];
-  time_t time;
-} 
-logRecord;
-
-// The read and write handlers for using the EEPROM Library
-void writer(unsigned long address, byte data) {
-    writeEEPROM(address, data);     //external
-}
-byte reader(unsigned long address) {
-    return readEEPROM(address);     //external
-}
-// Create an EDB object with the appropriate write and read handlers
-EDB db(&writer, &reader);
-EDB logDb(&writer, &reader);
-
-
-
 //LCD Screen
 LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 //LiquidCrystal_I2C lcd(0x20,  2, 1, 0, 4, 5, 6, 7, 3, NEGATIVE);
 
 
-
-
 //Network connection
-BBWiFi WiFi(wifiCsPin, wifiIrqPin, wifiVbenPin, onlinePin);
-
+BBWiFi WiFi(wifiCsPin, wifiIrqPin, wifiVbenPin, onlinePin, WIFI_SSID, WIFI_PASSWORD);
 
 //General functions for the access control system
 AccessControl accessControl(relayPin, buzzerPin, LEDPin, debugLedPin);
-
-
 
 //The received tag id
 char tagString[13];
 int rfidResetPin = 23;
 
-
-
 void setup() {
   
     Serial.begin(9600);
     
-    delay(2000);
+    //delay(2000);
   
     Serial.println("Starting");
   
@@ -138,9 +101,7 @@ void setup() {
     Serial.println("Setting up pins");
     pinMode(miscSwitch, INPUT_PULLUP);
     
-    
-    
-    
+     
     // ==== Time Setup ====
     Serial.println("Setting the time");
     setSyncProvider(getTeensy3Time);
@@ -159,22 +120,14 @@ void setup() {
     Serial3.begin(9600);
     pinMode(rfidResetPin, OUTPUT);
     digitalWrite(rfidResetPin, true);
-  
-  
-    
-    
+
     // ==== Screen Setup ====
     Wire.begin();
     Serial.println("Setting up display");
-    lcd.begin(8,2);
-    lcd.home();
-    lcd.print("Booting");
-    lcd.setCursor (0, 1);
-    lcd.print("Please wait");
-    
-    
-    
-    
+    lcd.begin(16,2);
+
+    showMessage("Booting", "Please wait..."); 
+        
     // ==== Network Setup ====
 
     Serial.println("Setting up network");
@@ -198,56 +151,40 @@ void setup() {
     //Open dbs starting at location 0
     openDBs();
     
-    Serial.println("Local Records");
-    Serial.println(countLocalRecords());
-    
-    /*
-    lcd.home();
-    lcd.print(db.limit());
-    lcd.print(":");
-    lcd.print(db.count());
-    lcd.setCursor (0, 1);
-    
-    lcd.print(logDb.limit());
-    lcd.print(":");
-    lcd.print(logDb.count());
-    delay(2000);
-    */
-    
-    
+    Serial.print("Local Member Records : ");
+    Serial.println(countLocalMemberRecords());
+    Serial.print("Local Log Entry Records : ");
+    Serial.println(countLocalLogRecords());
     
     heartbeatTimer = 300000;
     
     forceScreenRefresh = true;
-    
-
+ 
     //Setup the network on boot
-    //setupDelayTimmer = millis() + 300000;
+    //setupDelayTimer = millis() + 300000;
 }
 
 
 void loop() {
   
-  //Network setup process - ensures its setup if the first attempt fails
+  //Network setup process - ensures it's setup if the first attempt fails
   //Will try and connect every 5 minutes
-  if (!WiFi.isNetworkSetup() && (((setupDelayTimmer + 300000) < millis()) || setupDelayTimmer == 0)) {
-      lcd.home();
-      lcd.clear();
-      lcd.print("WiFi Connecting");
-      lcd.setCursor (0, 1);
-      lcd.print("Please wait");
+  if (!WiFi.isNetworkSetup() && (((setupDelayTimer + 300000) < millis()) || setupDelayTimer == 0)) {
+    
+      showMessage("WiFi Connecting", "Please wait");
       
       WiFi.checkConfigure();
       
-      setupDelayTimmer = millis();
+      setupDelayTimer = millis();
       
       forceScreenRefresh = true;
+      
   }
   
   //setTime(WiFi.getTime());
   //Teensy3Clock.set(WiFi.getTime());
   
-  //If the time hasnt been set and the wifi class has it set the time
+  //If the time hasn't been set and the wifi class has it set the time
   if (!accessControl.isTimeSet() && WiFi.hasTime()) {
     syncTime();
   }
@@ -270,26 +207,29 @@ void loop() {
 
       if (accessControl.systemOnline) {
 
-          pleaseWaitMessage();
+          //uploadingMessage();
 
           //If we havent reported the boot yet try that
-          if (!reportedHome) {
-            
-              Serial.println("Sending boot message");
-              if (WiFi.sendBootMessage(TYPE, DEVICE)) {
-                  reportedHome = true;
-                  forceScreenRefresh = true;
-              }
+          if (!bootMessageSent) {
+              showMessage("Sending boot", "message"); 
               
-          //} else if (countLocalLogRecords() > 0) {
-            
-          //    Serial.println("Uploading local records");
-          //    uploadLogFiles();
+              if (WiFi.sendBootMessage(SERVICE, DEVICE)) {
+                  bootMessageSent = true;
+                  forceScreenRefresh = true;
+                  showMessage("Boot message", "sent!"); 
+              } else { 
+                 showMessage("Boot message", "failed!"); 
+              }
+              //Serial.println("Boot message sent!"); 
+              //} else if (countLocalLogRecords() > 0) {
+              
+              //    Serial.println("Uploading local records");
+              //    uploadLogFiles();
               
           } else {
-
+              showMessage("Sending heartbeat", ""); 
               Serial.println("Sending heartbeat");
-              WiFi.sendHeartbeat(TYPE, DEVICE);
+              WiFi.sendHeartbeat(SERVICE, DEVICE);
               
           }
 
@@ -311,10 +251,9 @@ void loop() {
       //Beep to let the user know the tag was read
       accessControl.ackTone();
       
-      lcd.clear();
       
       //Lookup the tag
-      lcd.print("Checking Local");
+      showMessage("Checking Local");
       success = searchLocalDB(tagString);
       if (success) {
           //Save the current tag and time in the logfile for upload
@@ -323,8 +262,7 @@ void loop() {
           EDB_Status result = logDb.appendRec(EDB_REC logRecord);
               
       } else if (accessControl.systemOnline) {
-          lcd.clear();
-          lcd.print("Checking Remote");
+          showMessage("Checking Remote");
           success = searchRemoteDB(tagString);
       }
       
@@ -333,7 +271,7 @@ void loop() {
         
           accessControl.setSystemActive();
 
-          //accessControl.successTone();
+          accessControl.successTone();
           
       } else {
           //Tag not found
@@ -341,8 +279,7 @@ void loop() {
           
           accessControl.deactivateSystem();
           
-          lcd.clear();
-          lcd.print("No Access");
+          showMessage("No Access");
           
           delay(1000);
           
@@ -359,14 +296,10 @@ void loop() {
     
       //Open the door
       accessControl.activateRelay(1);
-      
-      
+           
       //Display the user on the screen
-      lcd.clear();
-      lcd.print("Welcome back");
-      lcd.setCursor (0, 1);
-      lcd.print(accessControl.activeUserName);
-      
+      showMessage("Welcome back", accessControl.activeUserName);
+     
       //If its been 4 seconds turn off the node
       if ((accessControl.getSystemActiveAt() + 4000) < millis()) {
           accessControl.deactivateSystem();
@@ -405,10 +338,10 @@ void loop() {
       
       
       
-      //Do we have anything to upload
-      if (accessControl.systemOnline && (countLocalLogRecords() > 0) && ((uploadDelayTimmer + 60000) < millis())) {
+      //Do we have anything to upload? Check every minute
+      if (accessControl.systemOnline && (countLocalLogRecords() > 0) && ((uploadDelayTimer + 60000) < millis())) {
           uploadLogFiles();
-          uploadDelayTimmer = millis();
+          uploadDelayTimer = millis();
       }
       
       
@@ -465,7 +398,7 @@ void displayReadyMessage()
   #endif
 }
 
-void pleaseWaitMessage() {
+void uploadingMessage() {
     lcd.home();
     lcd.clear();
     lcd.print("Uploading");
@@ -473,6 +406,22 @@ void pleaseWaitMessage() {
     lcd.print("Please wait");
 }
 
+void showMessage(char const *line1) { 
+  showMessage(line1, ""); 
+}
+void showMessage( char const *line1, char const *line2) { 
+
+    lcd.home();
+    lcd.clear();
+    lcd.print(line1);
+    lcd.setCursor (0, 1);
+    lcd.print(line2);
+
+  Serial.print("showMessage() "); 
+  Serial.print(line1); 
+  Serial.print(" "); 
+  Serial.println(line2); 
+}
 void resetLogDB()
 {
     //Create a table to store the access log data
@@ -483,32 +432,32 @@ void resetLogDB()
 void resetMemberDB()
 {
     //create table at with starting address 0 - this wipes the db
-    db.create(0, TABLE_SIZE/2, (unsigned int)sizeof(accessControlData));
+    memberDb.create(0, TABLE_SIZE/2, (unsigned int)sizeof(accessControlData));
     delay(500);
 }
 
 void openDBs()
 {
-    db.open(0);
+    memberDb.open(0);
     logDb.open(TABLE_SIZE/2);
 }
 
 
 boolean searchLocalDB(char tagString[13])
 {
-    //The local check is very quick, add a delay so the tones arent to close together!
-    //delay(500);
-
-    for (unsigned int recno = 1; recno <= db.count(); recno++)
+    for (unsigned int recno = 1; recno <= memberDb.count(); recno++)
     {
-      EDB_Status result = db.readRec(recno, EDB_REC accessControlData);
+      EDB_Status result = memberDb.readRec(recno, EDB_REC accessControlData);
       if (result == EDB_OK)
       {
+        Serial.print(recno); 
+        Serial.print(" found member record : "); 
+        Serial.println(accessControlData.name); 
         if (strcmp(accessControlData.tag, tagString) == 0)
         {
             //Copy the name for use later
             copyString(accessControl.activeUserName, accessControlData.name);
-
+            //memberDb.deleteRec(recno);
             return true;
         }
       }
@@ -519,10 +468,12 @@ boolean searchLocalDB(char tagString[13])
 
 
 
-uint8_t searchRemoteDB(char tagString[13])
+bool searchRemoteDB(char tagString[13])
 {
+  
     uint8_t index = 0;
-    uint8_t success = 0;
+    // why isn't this a bool? - SEB
+    bool success = false;
     
     //Reset the user name variable and error variable
     memset(&accessControl.activeUserName[0], 0, sizeof(accessControl.activeUserName));
@@ -530,7 +481,7 @@ uint8_t searchRemoteDB(char tagString[13])
     //Clear the buffer before sending the tag - we want a clean buffer
     WiFi.clearBuffer();
     
-    if (WiFi.sendLookup(TYPE, DEVICE, tagString) == false)
+    if (WiFi.sendLookup(SERVICE, DEVICE, tagString) == false)
     {
         return false;
     }
@@ -552,7 +503,7 @@ uint8_t searchRemoteDB(char tagString[13])
             //lcd.setCursor (0, 1);
             //lcd.print(name->valuestring);
             
-            success = 1;
+            success = true;
             
         } else {
             //Keyfob not found
@@ -561,13 +512,13 @@ uint8_t searchRemoteDB(char tagString[13])
         
         //Check for a local record and update it
         uint8_t foundLocal = 0;
-        if (countLocalRecords() > 0)
+        if (countLocalMemberRecords() > 0)
         {
-            for (int recno = 1; recno <= countLocalRecords(); recno++)
+            for (int recno = 1; recno <= countLocalMemberRecords(); recno++)
             {
                 //Serial.print("Recno: "); 
                 //Serial.println(recno);
-                EDB_Status result = db.readRec(recno, EDB_REC accessControlData);
+                EDB_Status result = memberDb.readRec(recno, EDB_REC accessControlData);
                 if (result == EDB_OK)
                 {
                     //Serial.print("Key: "); 
@@ -577,7 +528,7 @@ uint8_t searchRemoteDB(char tagString[13])
                         //Local record found
                         if (!success) {
                             //The local record needs to be removed
-                            db.deleteRec(recno);
+                            memberDb.deleteRec(recno);
                         }
                         foundLocal = 1;
                         Serial.println("Found existing local record");
@@ -592,7 +543,7 @@ uint8_t searchRemoteDB(char tagString[13])
           Serial.println("Adding record to the local db");
             copyString(accessControlData.tag, tagString);
             copyString(accessControlData.name, accessControl.activeUserName);
-            EDB_Status result = db.appendRec(EDB_REC accessControlData);
+            EDB_Status result = memberDb.appendRec(EDB_REC accessControlData);
         }
         
         aJson.deleteItem(jsonObject);
@@ -609,13 +560,16 @@ void uploadLogFiles() {
     lcd.print("Please Wait");
     lcd.setCursor (0, 1);
     lcd.print("Uploading...");
-  
+    Serial.println("uploadLogFiles()"); 
+    
+    Serial.print("number of records : "); Serial.println(countLocalLogRecords()); 
+    
     for (int recno = 1; recno <= countLocalLogRecords(); recno++)
     {
         EDB_Status result = logDb.readRec(recno, EDB_REC logRecord);
         if (result == EDB_OK)
         {   
-            if (WiFi.sendArchiveLookup(TYPE, DEVICE, logRecord.tag, logRecord.time))
+            if (WiFi.sendLogEntry(SERVICE, DEVICE, logRecord.tag, logRecord.time))
             {
                 logDb.deleteRec(recno);
             }
@@ -623,6 +577,7 @@ void uploadLogFiles() {
             delay(200);
         }
     }
+    Serial.print("Sent all the records - record count now : "); Serial.println(countLocalLogRecords()); 
     
     forceScreenRefresh = true;
 }
@@ -658,9 +613,10 @@ void copyString(char *p1, char *p2)
 
 // utility functions
 
-uint8_t countLocalRecords()
+uint8_t countLocalMemberRecords()
 {
-    return db.count();
+  
+    return memberDb.count();
 }
 
 uint8_t countLocalLogRecords()
@@ -692,36 +648,6 @@ void watchdogOn() {
 
 }
 */
-
-//External EEPROM
-void writeEEPROM(unsigned int eeaddress, byte data ) 
-{
-  Wire.beginTransmission(EXTERNAL_EEPROM_ADDR);
-  Wire.write((int)(eeaddress >> 8));   // MSB
-  Wire.write((int)(eeaddress & 0xFF)); // LSB
-  Wire.write(data);
-  Wire.endTransmission();
- 
-  delay(5);
-}
- 
-byte readEEPROM(unsigned int eeaddress ) 
-{
-  byte rdata = 0xFF;
- 
-  Wire.beginTransmission(EXTERNAL_EEPROM_ADDR);
-  Wire.write((int)(eeaddress >> 8));   // MSB
-  Wire.write((int)(eeaddress & 0xFF)); // LSB
-  Wire.endTransmission();
- 
-  Wire.requestFrom(EXTERNAL_EEPROM_ADDR,1);
- 
-  if (Wire.available()) rdata = Wire.read();
- 
-  return rdata;
-}
-
-
   
 void lcdTime() {
   
@@ -811,7 +737,7 @@ uint8_t rfidReadTag()
             break;
         }
     }
-    //If we have stoped reading and started in the frist palce
+    //If we have stoped reading and started in the frist place
     if (!reading && tagFetching) {
         tagFetched = 1;
         tagFetching = 0;
